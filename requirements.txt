@@ -1,11 +1,10 @@
 ccxt
 pandas
-numpy
 ta
 requests
-flask
+Flask
 joblib
-scikit-learn
 xgboost
+scikit-learn
 textblob
 pytz
