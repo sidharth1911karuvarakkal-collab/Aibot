@@ -3,7 +3,7 @@ import pandas as pd
 import ta
 import time
 import requests
-from flask import Flask
+from flask import Flask, send_file
 import threading
 from datetime import datetime
 import pytz
@@ -13,6 +13,7 @@ from sklearn.ensemble import RandomForestClassifier
 from textblob import TextBlob
 import os
 import subprocess
+import tarfile
 
 # ==============================
 # 🔧 AUTO TEXTBLOB SETUP (RUNS ONCE)
@@ -26,7 +27,7 @@ if not os.path.exists("textblob_data_installed"):
         print("TextBlob setup error:", e)
 
 # ==============================
-# 🔑 SETTINGS
+# 🔑 TELEGRAM SETTINGS
 # ==============================
 TOKEN = "8249716998:AAEM8PmCb9fia4UgagdbOClMwNOD_TBdqz4"
 CHAT_ID = "6094849602"
@@ -35,8 +36,8 @@ def send_telegram(msg):
     try:
         requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
                       data={"chat_id": CHAT_ID, "text": msg})
-    except:
-        pass
+    except Exception as e:
+        print("Telegram send error:", e)
 
 # ==============================
 # 📊 EXCHANGE
@@ -49,12 +50,14 @@ symbol = 'BTC/USDT'
 # ==============================
 model_xgb = None
 model_rf = None
+model_trained = False  # Flag to check training status
 
 def load_models():
-    global model_xgb, model_rf
+    global model_xgb, model_rf, model_trained
     try:
         model_xgb = joblib.load("model_xgb.pkl")
         model_rf = joblib.load("model_rf.pkl")
+        model_trained = True
         print("✅ Models Loaded")
     except:
         print("⚠️ No models yet (will train automatically)")
@@ -101,38 +104,31 @@ def ai_decision(features):
     return buy_prob, sell_prob
 
 # ==============================
-# 📰 FREE CRYPTO NEWS SENTIMENT
+# 📰 NEWS SENTIMENT
 # ==============================
 last_news_time = 0
 cached_sentiment = 0
 
 def get_news_sentiment():
     global last_news_time, cached_sentiment
-
     try:
-        # Cache for 10 minutes
-        if time.time() - last_news_time < 600:
+        if time.time() - last_news_time < 600:  # Cache 10 min
             return cached_sentiment
 
         url = "https://cryptocurrency.cv/api/news"
         data = requests.get(url).json()
-
         articles = data[:10]
 
         score = 0
         count = 0
-
         for a in articles:
             title = a.get("title", "")
-            polarity = TextBlob(title).sentiment.polarity
-            score += polarity
+            score += TextBlob(title).sentiment.polarity
             count += 1
 
         sentiment = score / count if count > 0 else 0
-
         cached_sentiment = sentiment
         last_news_time = time.time()
-
         return sentiment
 
     except Exception as e:
@@ -151,32 +147,22 @@ def check_signal(df1, df5, df15):
 
     sentiment = get_news_sentiment()
 
-    if sentiment > 0.1:
-        news_bias = "BUY"
-    elif sentiment < -0.1:
-        news_bias = "SELL"
-    else:
-        news_bias = "NEUTRAL"
+    news_bias = "NEUTRAL"
+    if sentiment > 0.1: news_bias = "BUY"
+    if sentiment < -0.1: news_bias = "SELL"
 
     signal = None
-
-    if buy_p > 0.7:
-        signal = "BUY"
-    elif sell_p > 0.7:
-        signal = "SELL"
+    if buy_p > 0.7: signal = "BUY"
+    elif sell_p > 0.7: signal = "SELL"
 
     # News filter
-    if signal == "BUY" and news_bias == "SELL":
-        signal = None
-    if signal == "SELL" and news_bias == "BUY":
-        signal = None
+    if signal == "BUY" and news_bias == "SELL": signal = None
+    if signal == "SELL" and news_bias == "BUY": signal = None
 
     # Momentum filter
     rsi = df1.iloc[-1]['rsi']
-    if signal == "BUY" and rsi < 55:
-        signal = None
-    if signal == "SELL" and rsi > 45:
-        signal = None
+    if signal == "BUY" and rsi < 55: signal = None
+    if signal == "SELL" and rsi > 45: signal = None
 
     price = df1.iloc[-1]['close']
     atr = df1.iloc[-1]['atr']
@@ -195,9 +181,17 @@ def check_signal(df1, df5, df15):
 # ==============================
 # 🤖 TRAIN AI
 # ==============================
-def train_ai():
-    global model_xgb, model_rf
+def create_model_pkg():
+    if os.path.exists("model_xgb.pkl") and os.path.exists("model_rf.pkl"):
+        with tarfile.open("model.pkg", "w:gz") as tar:
+            tar.add("model_xgb.pkl")
+            tar.add("model_rf.pkl")
+        print("✅ model.pkg created in main folder")
+    else:
+        print("⚠️ Models not found yet, cannot create model.pkg")
 
+def train_ai():
+    global model_xgb, model_rf, model_trained
     while True:
         try:
             print("🤖 Training AI...")
@@ -208,7 +202,6 @@ def train_ai():
             df = df.dropna()
 
             X, y = [], []
-
             for i in range(len(df)-1):
                 X.append([
                     df.iloc[i]['rsi'],
@@ -228,19 +221,22 @@ def train_ai():
             joblib.dump(model_xgb, "model_xgb.pkl")
             joblib.dump(model_rf, "model_rf.pkl")
 
+            create_model_pkg()  # Create model.pkg after training
+
+            model_trained = True
             send_telegram("🤖 AI Updated (Auto + News + Ensemble)")
 
         except Exception as e:
             print("AI Error:", e)
+            model_trained = False
 
-        time.sleep(86400)
+        time.sleep(86400)  # retrain every 24 hours
 
 # ==============================
 # 🤖 BOT LOOP
 # ==============================
 def run_bot():
     send_telegram("🚀 AI Bot LIVE (Auto Setup Enabled)")
-
     last_signal = ""
 
     while True:
@@ -253,7 +249,6 @@ def run_bot():
 
             if result:
                 side, price, tp, sl, conf, sentiment = result
-
                 if side != last_signal:
                     send_telegram(f"""
 {side} SIGNAL
@@ -281,6 +276,18 @@ app = Flask(__name__)
 @app.route('/')
 def home():
     return "🚀 Bot Running (Auto Setup Active)"
+
+@app.route('/check_models')
+def check_models():
+    if model_trained and os.path.exists("model_xgb.pkl") and os.path.exists("model_rf.pkl"):
+        return "✅ Models trained and ready"
+    return "❌ Models not trained yet"
+
+@app.route('/download_model_pkg')
+def download_model_pkg():
+    if os.path.exists("model.pkg"):
+        return send_file("model.pkg")
+    return "❌ model.pkg not created yet"
 
 # ==============================
 # ▶️ START
