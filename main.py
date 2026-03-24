@@ -13,7 +13,6 @@ from sklearn.ensemble import RandomForestClassifier
 from textblob import TextBlob
 import os
 import subprocess
-import tarfile
 
 # ==============================
 # 🔧 AUTO TEXTBLOB SETUP (RUNS ONCE)
@@ -27,7 +26,7 @@ if not os.path.exists("textblob_data_installed"):
         print("TextBlob setup error:", e)
 
 # ==============================
-# 🔑 TELEGRAM SETTINGS
+# 🔑 SETTINGS
 # ==============================
 TOKEN = "8249716998:AAEM8PmCb9fia4UgagdbOClMwNOD_TBdqz4"
 CHAT_ID = "6094849602"
@@ -37,7 +36,7 @@ def send_telegram(msg):
         requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage",
                       data={"chat_id": CHAT_ID, "text": msg})
     except Exception as e:
-        print("Telegram send error:", e)
+        print("Telegram Error:", e)
 
 # ==============================
 # 📊 EXCHANGE
@@ -50,7 +49,7 @@ symbol = 'BTC/USDT'
 # ==============================
 model_xgb = None
 model_rf = None
-model_trained = False  # Flag to check training status
+model_trained = False
 
 def load_models():
     global model_xgb, model_rf, model_trained
@@ -72,10 +71,8 @@ def get_data(tf):
     df['rsi'] = ta.momentum.RSIIndicator(df['close']).rsi()
     df['macd'] = ta.trend.MACD(df['close']).macd()
     df['ema'] = df['close'].ewm(span=20).mean()
-
     df['atr'] = ta.volatility.AverageTrueRange(df['high'], df['low'], df['close']).average_true_range()
     df['adx'] = ta.trend.ADXIndicator(df['high'], df['low'], df['close']).adx()
-
     return df
 
 # ==============================
@@ -83,7 +80,6 @@ def get_data(tf):
 # ==============================
 def get_features(df1, df5, df15):
     l1, l5, l15 = df1.iloc[-1], df5.iloc[-1], df15.iloc[-1]
-
     return [[
         l1['rsi'], l5['rsi'], l15['rsi'],
         l1['macd'], l5['macd'], l15['macd'],
@@ -97,14 +93,12 @@ def get_features(df1, df5, df15):
 def ai_decision(features):
     p1 = model_xgb.predict_proba(features)[0]
     p2 = model_rf.predict_proba(features)[0]
-
     buy_prob = (p1[1] + p2[1]) / 2
     sell_prob = (p1[0] + p2[0]) / 2
-
     return buy_prob, sell_prob
 
 # ==============================
-# 📰 NEWS SENTIMENT
+# 📰 FREE CRYPTO NEWS SENTIMENT
 # ==============================
 last_news_time = 0
 cached_sentiment = 0
@@ -112,60 +106,55 @@ cached_sentiment = 0
 def get_news_sentiment():
     global last_news_time, cached_sentiment
     try:
-        if time.time() - last_news_time < 600:  # Cache 10 min
+        if time.time() - last_news_time < 600:
             return cached_sentiment
-
         url = "https://cryptocurrency.cv/api/news"
         data = requests.get(url).json()
         articles = data[:10]
-
         score = 0
         count = 0
         for a in articles:
             title = a.get("title", "")
-            score += TextBlob(title).sentiment.polarity
+            polarity = TextBlob(title).sentiment.polarity
+            score += polarity
             count += 1
-
         sentiment = score / count if count > 0 else 0
         cached_sentiment = sentiment
         last_news_time = time.time()
         return sentiment
-
     except Exception as e:
         print("News Error:", e)
         return 0
 
 # ==============================
-# 🤖 SIGNAL LOGIC
+# 🤖 SIGNAL LOGIC (TEMP TEST MODE)
 # ==============================
 def check_signal(df1, df5, df15):
     if model_xgb is None or model_rf is None:
+        print("Models not loaded")
         return None
 
     features = get_features(df1, df5, df15)
     buy_p, sell_p = ai_decision(features)
-
-    sentiment = get_news_sentiment()
-
-    news_bias = "NEUTRAL"
-    if sentiment > 0.1: news_bias = "BUY"
-    if sentiment < -0.1: news_bias = "SELL"
-
-    signal = None
-    if buy_p > 0.7: signal = "BUY"
-    elif sell_p > 0.7: signal = "SELL"
-
-    # News filter
-    if signal == "BUY" and news_bias == "SELL": signal = None
-    if signal == "SELL" and news_bias == "BUY": signal = None
-
-    # Momentum filter
-    rsi = df1.iloc[-1]['rsi']
-    if signal == "BUY" and rsi < 55: signal = None
-    if signal == "SELL" and rsi > 45: signal = None
-
     price = df1.iloc[-1]['close']
     atr = df1.iloc[-1]['atr']
+    rsi = df1.iloc[-1]['rsi']
+    sentiment = get_news_sentiment()
+
+    # --------------------------
+    # DEBUG PRINT
+    print(f"[DEBUG] Buy prob: {buy_p:.2f}, Sell prob: {sell_p:.2f}, RSI: {rsi:.2f}, Sentiment: {sentiment:.2f}, Price: {price}")
+    # --------------------------
+
+    signal = None
+
+    # TEMPORARY LOWER THRESHOLDS
+    if buy_p > 0.5:  # lowered from 0.7
+        signal = "BUY"
+    elif sell_p > 0.5:  # lowered from 0.7
+        signal = "SELL"
+
+    # TEMPORARILY DISABLE NEWS & RSI FILTERS
 
     if signal == "BUY":
         tp = price + 2 * atr
@@ -181,72 +170,49 @@ def check_signal(df1, df5, df15):
 # ==============================
 # 🤖 TRAIN AI
 # ==============================
-def create_model_pkg():
-    if os.path.exists("model_xgb.pkl") and os.path.exists("model_rf.pkl"):
-        with tarfile.open("model.pkg", "w:gz") as tar:
-            tar.add("model_xgb.pkl")
-            tar.add("model_rf.pkl")
-        print("✅ model.pkg created in main folder")
-    else:
-        print("⚠️ Models not found yet, cannot create model.pkg")
-
 def train_ai():
     global model_xgb, model_rf, model_trained
     while True:
         try:
             print("🤖 Training AI...")
-
             df = get_data('1m')
             df['future'] = df['close'].shift(-3)
             df['target'] = (df['future'] > df['close']).astype(int)
             df = df.dropna()
-
             X, y = [], []
             for i in range(len(df)-1):
-                X.append([
-                    df.iloc[i]['rsi'],
-                    df.iloc[i]['macd'],
-                    df.iloc[i]['ema'],
-                    df.iloc[i]['atr'],
-                    df.iloc[i]['adx']
-                ])
+                X.append([df.iloc[i]['rsi'], df.iloc[i]['macd'], df.iloc[i]['ema'], df.iloc[i]['atr'], df.iloc[i]['adx']])
                 y.append(df.iloc[i]['target'])
-
             model_xgb = XGBClassifier(n_estimators=50, max_depth=3, verbosity=0)
             model_rf = RandomForestClassifier(n_estimators=100)
-
             model_xgb.fit(X, y)
             model_rf.fit(X, y)
-
             joblib.dump(model_xgb, "model_xgb.pkl")
             joblib.dump(model_rf, "model_rf.pkl")
-
-            create_model_pkg()  # Create model.pkg after training
-
-            model_trained = True
+            # Create model.pkg
+            import tarfile
+            with tarfile.open("model.pkg", "w:gz") as tar:
+                tar.add("model_xgb.pkl")
+                tar.add("model_rf.pkl")
+            # Reload models after training
+            load_models()
             send_telegram("🤖 AI Updated (Auto + News + Ensemble)")
-
         except Exception as e:
             print("AI Error:", e)
-            model_trained = False
-
-        time.sleep(86400)  # retrain every 24 hours
+        time.sleep(86400)  # retrain daily
 
 # ==============================
 # 🤖 BOT LOOP
 # ==============================
 def run_bot():
-    send_telegram("🚀 AI Bot LIVE (Auto Setup Enabled)")
+    send_telegram("🚀 AI Bot LIVE (Test Mode Enabled)")
     last_signal = ""
-
     while True:
         try:
             df1 = get_data('1m')
             df5 = get_data('5m')
             df15 = get_data('15m')
-
             result = check_signal(df1, df5, df15)
-
             if result:
                 side, price, tp, sl, conf, sentiment = result
                 if side != last_signal:
@@ -261,9 +227,7 @@ def run_bot():
 📰 Sentiment: {round(sentiment,3)}
 """)
                     last_signal = side
-
             time.sleep(30)
-
         except Exception as e:
             print("Bot Error:", e)
             time.sleep(10)
@@ -275,19 +239,19 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "🚀 Bot Running (Auto Setup Active)"
-
-@app.route('/check_models')
-def check_models():
-    if model_trained and os.path.exists("model_xgb.pkl") and os.path.exists("model_rf.pkl"):
-        return "✅ Models trained and ready"
-    return "❌ Models not trained yet"
+    return "🚀 Bot Running (Test Mode Active)"
 
 @app.route('/download_model_pkg')
 def download_model_pkg():
     if os.path.exists("model.pkg"):
         return send_file("model.pkg")
     return "❌ model.pkg not created yet"
+
+@app.route('/check_models')
+def check_models():
+    if model_trained:
+        return "✅ Models trained and ready"
+    return "❌ Models not ready yet"
 
 # ==============================
 # ▶️ START
