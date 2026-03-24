@@ -5,8 +5,6 @@ import time
 import requests
 from flask import Flask, send_file
 import threading
-from datetime import datetime
-import pytz
 import joblib
 from xgboost import XGBClassifier
 from sklearn.ensemble import RandomForestClassifier
@@ -16,7 +14,7 @@ import subprocess
 import tarfile
 
 # ==============================
-# AUTO TEXTBLOB SETUP
+# TEXTBLOB SETUP
 # ==============================
 if not os.path.exists("textblob_data_installed"):
     try:
@@ -24,7 +22,7 @@ if not os.path.exists("textblob_data_installed"):
         open("textblob_data_installed", "w").close()
         print("✅ TextBlob data installed")
     except Exception as e:
-        print("TextBlob setup error:", e)
+        print("TextBlob error:", e)
 
 # ==============================
 # TELEGRAM SETTINGS
@@ -52,17 +50,15 @@ symbol = 'BTC/USDT'
 # ==============================
 model_xgb = None
 model_rf = None
-model_trained = False
 
 def load_models():
-    global model_xgb, model_rf, model_trained
+    global model_xgb, model_rf
     try:
         model_xgb = joblib.load("model_xgb.pkl")
         model_rf = joblib.load("model_rf.pkl")
-        model_trained = True
         print("✅ Models Loaded")
     except:
-        print("⚠️ No models yet (will train automatically)")
+        print("⚠️ No models yet (training will start)")
 
 # ==============================
 # DATA
@@ -80,15 +76,16 @@ def get_data(tf):
     return df
 
 # ==============================
-# FEATURES
+# FEATURES (FIXED - 5 FEATURES)
 # ==============================
-def get_features(df1, df5, df15):
-    l1, l5, l15 = df1.iloc[-1], df5.iloc[-1], df15.iloc[-1]
+def get_features(df1):
+    l1 = df1.iloc[-1]
     return [[
-        l1['rsi'], l5['rsi'], l15['rsi'],
-        l1['macd'], l5['macd'], l15['macd'],
-        l1['ema'], l5['ema'], l15['ema'],
-        l1['atr'], l1['adx']
+        l1['rsi'],
+        l1['macd'],
+        l1['ema'],
+        l1['atr'],
+        l1['adx']
     ]]
 
 # ==============================
@@ -102,29 +99,14 @@ def ai_decision(features):
     return buy_prob, sell_prob
 
 # ==============================
-# NEWS SENTIMENT
+# SIGNAL LOGIC
 # ==============================
-def get_news_sentiment():
-    try:
-        url = "https://cryptocurrency.cv/api/news"
-        data = requests.get(url).json()
-        articles = data[:5]
-        score = 0
-        for a in articles:
-            score += TextBlob(a.get("title","")).sentiment.polarity
-        return score / len(articles)
-    except:
-        return 0
-
-# ==============================
-# SIGNAL LOGIC (TEST MODE)
-# ==============================
-def check_signal(df1, df5, df15):
+def check_signal(df1):
     if model_xgb is None or model_rf is None:
-        print("Models not loaded")
+        print("❌ Models not loaded")
         return None
 
-    features = get_features(df1, df5, df15)
+    features = get_features(df1)
     buy_p, sell_p = ai_decision(features)
 
     price = df1.iloc[-1]['close']
@@ -134,7 +116,7 @@ def check_signal(df1, df5, df15):
 
     signal = None
 
-    # LOWERED THRESHOLD
+    # LOWERED THRESHOLD (TEST MODE)
     if buy_p > 0.5:
         signal = "BUY"
     elif sell_p > 0.5:
@@ -204,16 +186,14 @@ def train_ai():
 # BOT LOOP
 # ==============================
 def run_bot():
-    send_telegram("🚀 BOT LIVE (Fixed Version)")
+    send_telegram("🚀 BOT LIVE (Final Fixed)")
     last_signal = ""
 
     while True:
         try:
             df1 = get_data('1m')
-            df5 = get_data('5m')
-            df15 = get_data('15m')
 
-            result = check_signal(df1, df5, df15)
+            result = check_signal(df1)
 
             if result:
                 side, price, tp, sl, conf = result
@@ -222,11 +202,11 @@ def run_bot():
                     send_telegram(f"""
 {side} SIGNAL
 
-Price: {price}
-TP: {tp}
-SL: {sl}
+💰 Price: {price}
+🎯 TP: {tp}
+🛑 SL: {sl}
 
-Confidence: {round(conf*100,2)}%
+🤖 Confidence: {round(conf*100,2)}%
 """)
                     last_signal = side
 
@@ -246,7 +226,7 @@ def home():
     return "🚀 Bot Running"
 
 @app.route('/download_model_pkg')
-def download_model_pkg():
+def download():
     if os.path.exists("model.pkg"):
         return send_file("model.pkg")
     return "No model yet"
@@ -259,12 +239,9 @@ if __name__ == "__main__":
 
     print("🚀 Starting Threads...")
 
-    t1 = threading.Thread(target=run_bot, daemon=True)
-    t1.start()
+    threading.Thread(target=run_bot, daemon=True).start()
+    threading.Thread(target=train_ai, daemon=True).start()
 
-    t2 = threading.Thread(target=train_ai, daemon=True)
-    t2.start()
-
-    print("✅ Threads Started")
+    print("✅ Bot Started Successfully")
 
     app.run(host="0.0.0.0", port=10000, use_reloader=False)
