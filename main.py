@@ -3,26 +3,13 @@ import pandas as pd
 import ta
 import time
 import requests
-from flask import Flask, send_file
+from flask import Flask
 import threading
 import joblib
 from xgboost import XGBClassifier
 from sklearn.ensemble import RandomForestClassifier
-from textblob import TextBlob
 import os
-import subprocess
 import tarfile
-
-# ==============================
-# TEXTBLOB SETUP
-# ==============================
-if not os.path.exists("textblob_data_installed"):
-    try:
-        subprocess.run(["python", "-m", "textblob.download_corpora"])
-        open("textblob_data_installed", "w").close()
-        print("✅ TextBlob data installed")
-    except Exception as e:
-        print("TextBlob error:", e)
 
 # ==============================
 # TELEGRAM SETTINGS
@@ -31,13 +18,11 @@ TOKEN = "8249716998:AAEM8PmCb9fia4UgagdbOClMwNOD_TBdqz4"
 CHAT_ID = "6094849602"
 
 def send_telegram(msg):
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-            data={"chat_id": CHAT_ID, "text": msg}
-        )
-    except Exception as e:
-        print("Telegram Error:", e)
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    requests.post(url, json={
+        "chat_id": CHAT_ID,
+        "text": msg
+    })
 
 # ==============================
 # EXCHANGE
@@ -58,7 +43,7 @@ def load_models():
         model_rf = joblib.load("model_rf.pkl")
         print("✅ Models Loaded")
     except:
-        print("⚠️ No models yet (training will start)")
+        print("⚠️ No models found, training will start")
 
 # ==============================
 # DATA
@@ -67,8 +52,11 @@ def get_data(tf):
     df = pd.DataFrame(exchange.fetch_ohlcv(symbol, tf, limit=120),
                       columns=['time','open','high','low','close','volume'])
 
+    macd = ta.trend.MACD(df['close'])
+
     df['rsi'] = ta.momentum.RSIIndicator(df['close']).rsi()
-    df['macd'] = ta.trend.MACD(df['close']).macd()
+    df['macd'] = macd.macd()
+    df['macd_signal'] = macd.macd_signal()
     df['ema'] = df['close'].ewm(span=20).mean()
     df['atr'] = ta.volatility.AverageTrueRange(df['high'], df['low'], df['close']).average_true_range()
     df['adx'] = ta.trend.ADXIndicator(df['high'], df['low'], df['close']).adx()
@@ -76,7 +64,7 @@ def get_data(tf):
     return df
 
 # ==============================
-# FEATURES (FIXED - 5 FEATURES)
+# FEATURES
 # ==============================
 def get_features(df1):
     l1 = df1.iloc[-1]
@@ -103,23 +91,29 @@ def ai_decision(features):
 # ==============================
 def check_signal(df1):
     if model_xgb is None or model_rf is None:
-        print("❌ Models not loaded")
         return None
 
     features = get_features(df1)
     buy_p, sell_p = ai_decision(features)
 
-    price = df1.iloc[-1]['close']
-    atr = df1.iloc[-1]['atr']
+    last = df1.iloc[-1]
 
-    print(f"[DEBUG] Buy: {buy_p:.2f} | Sell: {sell_p:.2f} | Price: {price}")
+    rsi = last['rsi']
+    macd = last['macd']
+    macd_signal = last['macd_signal']
+
+    price = last['close']
+    atr = last['atr']
+
+    print(f"[DEBUG] Buy:{buy_p:.2f} Sell:{sell_p:.2f} RSI:{rsi:.2f} MACD:{macd:.2f}")
 
     signal = None
 
-    # LOWERED THRESHOLD (TEST MODE)
-    if buy_p > 0.5:
+    # ✅ HIGH ACCURACY FILTER
+    if buy_p > 0.6 and rsi > 55 and macd > macd_signal:
         signal = "BUY"
-    elif sell_p > 0.5:
+
+    elif sell_p > 0.6 and rsi < 45 and macd < macd_signal:
         signal = "SELL"
 
     if not signal:
@@ -160,8 +154,8 @@ def train_ai():
                 ])
                 y.append(df.iloc[i]['target'])
 
-            model_xgb = XGBClassifier(n_estimators=50, max_depth=3, verbosity=0)
-            model_rf = RandomForestClassifier(n_estimators=100)
+            model_xgb = XGBClassifier(n_estimators=80, max_depth=4, verbosity=0)
+            model_rf = RandomForestClassifier(n_estimators=150)
 
             model_xgb.fit(X, y)
             model_rf.fit(X, y)
@@ -186,29 +180,35 @@ def train_ai():
 # BOT LOOP
 # ==============================
 def run_bot():
-    send_telegram("🚀 BOT LIVE (Final Fixed)")
+    send_telegram("🚀 BOT LIVE (NO WEBHOOK MODE)")
+
     last_signal = ""
+    last_signal_time = 0
+    cooldown = 180  # 3 minutes
 
     while True:
         try:
             df1 = get_data('1m')
-
             result = check_signal(df1)
 
             if result:
                 side, price, tp, sl, conf = result
 
-                if side != last_signal:
-                    send_telegram(f"""
-{side} SIGNAL
+                if side != last_signal and time.time() - last_signal_time > cooldown:
 
-💰 Price: {price}
-🎯 TP: {tp}
-🛑 SL: {sl}
+                    msg = (
+                        f"📊 {side} SIGNAL\n\n"
+                        f"💰 Price: {round(price,2)}\n"
+                        f"🎯 TP: {round(tp,2)}\n"
+                        f"🛑 SL: {round(sl,2)}\n\n"
+                        f"🤖 Confidence: {round(conf*100,2)}%\n"
+                        f"⏱ Time: {time.strftime('%H:%M:%S')}"
+                    )
 
-🤖 Confidence: {round(conf*100,2)}%
-""")
+                    send_telegram(msg)
+
                     last_signal = side
+                    last_signal_time = time.time()
 
             time.sleep(30)
 
@@ -217,7 +217,7 @@ def run_bot():
             time.sleep(10)
 
 # ==============================
-# FLASK
+# FLASK (FOR UPTIME ROBOT)
 # ==============================
 app = Flask(__name__)
 
@@ -225,23 +225,15 @@ app = Flask(__name__)
 def home():
     return "🚀 Bot Running"
 
-@app.route('/download_model_pkg')
-def download():
-    if os.path.exists("model.pkg"):
-        return send_file("model.pkg")
-    return "No model yet"
-
 # ==============================
 # START
 # ==============================
 if __name__ == "__main__":
     load_models()
 
-    print("🚀 Starting Threads...")
+    print("🚀 Starting Bot...")
 
     threading.Thread(target=run_bot, daemon=True).start()
     threading.Thread(target=train_ai, daemon=True).start()
 
-    print("✅ Bot Started Successfully")
-
-    app.run(host="0.0.0.0", port=10000, use_reloader=False)
+    app.run(host="0.0.0.0", port=10000)
